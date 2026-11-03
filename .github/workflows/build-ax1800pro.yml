@@ -10,6 +10,7 @@ on:
       - 'target/linux/qualcommax/**'
       - 'package/**'
       - '.github/workflows/build-ax1800pro.yml'
+      - 'router-profile/**'
 
 env:
   DEVICE_TARGET: qualcommax/ipq60xx
@@ -29,6 +30,243 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - name: 生成集成配置与部署工具 (Materialize router profile)
+        run: |
+          mkdir -p router-profile
+          mkdir -p router-profile
+          cat > router-profile/README.md <<'ROUTER_PROFILE_EOF'
+          # 亚瑟 RE-SS-01 集成配置
+          
+          此配置面向 JDCloud AX1800 Pro / RE-SS-01，不能用于其他机型。
+          
+          ## 固件与首次部署
+          
+          固件内置 PassWall（Hysteria2、Xray）、Tailscale、dnsmasq-full 和匹配内核的 TUN/nftables 依赖。PassWall 源码使用固定提交；Tailscale 与无线驱动来自固件原生 feeds。OpenClash 暂不同时启动；目前工作中的代理为 PassWall。
+          
+          新固件先作为 prerelease 发布。构建通过不等于实机验证通过：刷写后必须验证系统分区、两个无线频段、LAN 上网和手机出口，再用于下一台设备。
+          
+          1. 核实机型、eMMC 实际分区和 U-Boot/HLOS 大小。只有 U-Boot 的设备按仓库主 README 准备匹配的 12MiB HLOS / 2GiB rootfs GPT；不要在未核对分区表时写盘。
+          2. 校验固件 SHA256。全新刷入用 factory；已运行本系统用 sysupgrade。所有分区操作前备份原分区表。
+          3. 首次配置管理员密码和无线 WPA2/WPA3 密码。固件不嵌入公共 Wi-Fi 密码，也不会自动广播无密码网络。保留配置升级时不重写原密码。
+          4. 用 release 中 `rootfs-integrity.txt` 的 BYTES、SHA256 运行 `router-rootfs-verify BYTES SHA256`。失败时不要用覆盖单文件的方法认定整机已修好。
+          5. 按实机分区建立/启用 swap 和 SMB。不得在启动脚本里自动格式化 p26/p27；分区号及 UUID 需逐台核实。不要复制另一台的 Tailscale state、主机密钥、MAC、磁盘 UUID。
+          
+          ## PassWall 与 Tailscale 出口
+          
+          1. 在 PassWall 界面导入自己的节点，先测试 LAN 的国内 DNS、Google 和 X，再启用手机出口。HY2 用 Hysteria2；VLESS+WS+TLS 用 Xray。优先保留已经验证正常的主节点，备用节点不自动切换。
+          2. `/etc/init.d/tailscale enable`，`/etc/init.d/tailscale start`；`tailscale up --accept-dns=false`，自行完成账户授权。不要接受其他出口节点的子网路由，除非确有需求。
+          3. 检查 PassWall 的实际透明代理端口与 DNS 端口。已调试版本为 1041 和 11400，升级后必须复核。
+          4. 执行 `router-exit-setup PHONE_TAILSCALE_IPV4 '1041 11400'`。脚本仅允许所指定手机的 IPv4 到 WAN 及所需路由器端口；不开放其他 tailnet 设备和 LAN 共享。它会从 tailscaled 实际监听信息获取 PeerAPI 端口，备份防火墙并执行 fw4 check。已有其他 tailscale0 防火墙分区时会拒绝创建重复区域，需保留/迁移原规则。
+          5. Tailscale 后台批准本机出口，手机出口选这台新路由器。断开其他 VPN 后测试。运行 `router-network-check` 检查资源、DNS监听与无线状态。PeerAPI 端口改变后重跑出口脚本。此脚本目前只配置 IPv4 出口，不能视为 IPv6 完整出口方案。
+          
+          节点、订阅、无线密码和 Tailscale 登录状态只在设备/私有备份里保存，不提交公开 GitHub。
+          
+          ## 已知问题与验证边界
+          
+          - 2026-11-03 实机 hostapd 出现 I/O error；SQUASHFS 块 0x5eec687 解压失败，重装 wpad 后两个 AP 可启动。这说明无线运行程序读取出错，并不能证明无线驱动本身有 bug。
+          - 本次新增完整解包门禁、ELF 架构检查及刷写后原始 rootfs 哈希核对，用于区分构建产物损坏与刷写/存储读取损坏；尚未确定是哪一环导致本次损坏，不能声称重编译一定根治。
+          - 先前 MSS=1200 的 workaround 没有独立证明有效，不默认写入新固件。
+          - Go GOMEMLIMIT 是软限制，不能作为 OOM 保证；本版本不把极路由的 48MiB 参数硬套到亚瑟。
+          - 资源充足时再测试多部手机并发与 SMB。视频流畅、单次 curl 成功均不能替代持续稳定性测试。
+          ROUTER_PROFILE_EOF
+          mkdir -p router-profile/files/etc/uci-defaults
+          cat > router-profile/files/etc/uci-defaults/99-router-profile <<'ROUTER_PROFILE_EOF'
+          #!/bin/sh
+          # Read-only startup checks; never overwrite retained config or credentials.
+          [ "$(cat /tmp/sysinfo/board_name)" = jdcloud,re-ss-01 ] || exit 0
+          [ -c /dev/net/tun ] || logger -t router-profile 'ERROR: /dev/net/tun missing'
+          hostapd -v >/dev/null 2>&1 || logger -t router-profile 'ERROR: hostapd cannot execute; check SQUASHFS errors'
+          exit 0
+          ROUTER_PROFILE_EOF
+          mkdir -p router-profile/files/usr/sbin
+          cat > router-profile/files/usr/sbin/router-exit-setup <<'ROUTER_PROFILE_EOF'
+          #!/bin/sh
+          # Explicit opt-in: one authenticated tailnet IPv4 peer, never all peers.
+          set -eu
+          [ "$#" -ge 1 ] && [ "$#" -le 2 ] || { echo 'Usage: router-exit-setup PHONE_TAILSCALE_IPV4 [PASSWALL_PORTS]' >&2; exit 2; }
+          phone=$1
+          printf '%s\n' "$phone" | awk -F. 'NF!=4 {exit 1} {for(i=1;i<=4;i++) if($i !~ /^[0-9]+$/ || $i>255) exit 1; if($1!=100 || $2<64 || $2>127) exit 1}' || exit 2
+          ports=${2:-1041 11400}
+          for p in $ports; do case "$p" in ''|*[!0-9]*) exit 2;; esac; [ "$p" -ge 1 ] && [ "$p" -le 65535 ] || exit 2; done
+          # Avoid assigning one interface to two zones on an upgraded router.
+          if uci show firewall | grep "\.device='tailscale0'" | grep -v '^firewall.router_ts.device=' >/dev/null; then
+           echo 'tailscale0 already belongs to another zone; retain/migrate that zone manually.' >&2
+           exit 1
+          fi
+          tailscale ip -4 >/dev/null
+          # PeerAPI ports are discovered, not copied from another router.
+          peer_ports=$(netstat -lntp 2>/dev/null | awk '/tailscaled/ {n=split($4,a,":"); if(a[n] ~ /^[0-9]+$/) print a[n]}' | sort -un | tr '\n' ' ')
+          [ -n "$peer_ports" ] || { echo 'No PeerAPI listener found; retry after Tailscale login.' >&2; exit 1; }
+          mkdir -p /root/router-backups
+          chmod 700 /root/router-backups
+          stamp=$(date +%Y%m%d-%H%M%S)
+          cp -p /etc/config/firewall "/root/router-backups/firewall-$stamp"
+          # Refuse unsaved user edits; preserve the operator's other firewall changes.
+          [ -z "$(uci changes firewall)" ] || { echo 'Save/revert pending firewall changes first.' >&2; exit 1; }
+          uci set firewall.router_ts=zone
+          uci set firewall.router_ts.name='router_ts'
+          uci set firewall.router_ts.device='tailscale0'
+          uci set firewall.router_ts.input='REJECT'
+          uci set firewall.router_ts.output='ACCEPT'
+          uci set firewall.router_ts.forward='REJECT'
+          uci set firewall.router_ts_web=rule
+          uci set firewall.router_ts_web.name='Router-Tailscale-Services'
+          uci set firewall.router_ts_web.src='router_ts'
+          uci set firewall.router_ts_web.src_ip="$phone"
+          uci set firewall.router_ts_web.proto='tcp'
+          uci set firewall.router_ts_web.dest_port="80 443 $peer_ports"
+          uci set firewall.router_ts_web.family='ipv4'
+          uci set firewall.router_ts_web.target='ACCEPT'
+          uci set firewall.router_ts_proxy=rule
+          uci set firewall.router_ts_proxy.name='Router-Tailscale-Proxy-DNS'
+          uci set firewall.router_ts_proxy.src='router_ts'
+          uci set firewall.router_ts_proxy.src_ip="$phone"
+          uci set firewall.router_ts_proxy.proto='tcp udp'
+          uci set firewall.router_ts_proxy.dest_port="53 $ports"
+          uci set firewall.router_ts_proxy.family='ipv4'
+          uci set firewall.router_ts_proxy.target='ACCEPT'
+          uci set firewall.router_ts_wan=rule
+          uci set firewall.router_ts_wan.name='Router-Tailscale-WAN'
+          uci set firewall.router_ts_wan.src='router_ts'
+          uci set firewall.router_ts_wan.dest='wan'
+          uci set firewall.router_ts_wan.src_ip="$phone"
+          uci set firewall.router_ts_wan.proto='all'
+          uci set firewall.router_ts_wan.family='ipv4'
+          uci set firewall.router_ts_wan.target='ACCEPT'
+          if ! fw4 check; then
+           uci revert firewall
+           echo 'Firewall check failed; staged changes reverted.' >&2
+           exit 1
+          fi
+          uci commit firewall
+          /etc/init.d/firewall reload
+          sysctl -w net.ipv4.ip_forward=1
+          printf 'net.ipv4.ip_forward=1\n' >/etc/sysctl.d/90-router-exit.conf
+          tailscale set --accept-dns=false --advertise-exit-node
+          echo 'Approve exit node in the Tailscale admin console, then select THIS router on the phone.'
+          echo 'IPv4 only. Verify PassWall redirect ports before testing. Rerun if PeerAPI ports change.'
+          ROUTER_PROFILE_EOF
+          mkdir -p router-profile/files/usr/sbin
+          cat > router-profile/files/usr/sbin/router-network-check <<'ROUTER_PROFILE_EOF'
+          #!/bin/sh
+          # Local diagnostics only; deliberately excludes node configs and credentials.
+          printf '\n== Memory ==\n'; free
+          printf '\n== Swap ==\n'; cat /proc/swaps
+          printf '\n== Wireless ==\n'; wifi status | jsonfilter -e '@.*.up' -e '@.*.pending' -e '@.*.disabled'
+          printf '\n== Wireless executable ==\n'; hostapd -v 2>&1 | head -3
+          printf '\n== Tailscale ==\n'; tailscale status
+          printf '\n== Forwarding ==\n'; sysctl net.ipv4.ip_forward net.ipv6.conf.all.forwarding
+          printf '\n== Policy routing ==\n'; ip -4 rule show
+          printf '\n== Listening proxy/VPN processes ==\n'; netstat -lntup 2>/dev/null | grep -E 'tailscaled|hysteria|xray|sing-box|dnsmasq'
+          printf '\n== Recent faults (may include old faults) ==\n'; logread | grep -Ei 'Out of memory|Killed process|SQUASHFS error|AP-ENABLED|failed to execute.*hostapd' | tail -12
+          ROUTER_PROFILE_EOF
+          mkdir -p router-profile/files/usr/sbin
+          cat > router-profile/files/usr/sbin/router-rootfs-verify <<'ROUTER_PROFILE_EOF'
+          #!/bin/sh
+          # Compare only SquashFS bytes_used, excluding mutable overlay/padding.
+          set -eu
+          [ "$#" = 2 ] || { echo 'Usage: router-rootfs-verify BYTES SHA256' >&2; exit 2; }
+          case "$1" in ''|*[!0-9]*) exit 2;; esac
+          [ "$1" -gt 0 ] && [ "$1" -le 2147483648 ] || exit 2
+          [ "${#2}" = 64 ] || exit 2
+          case "$2" in *[!0-9a-f]*) exit 2;; esac
+          [ "$(cat /tmp/sysinfo/board_name)" = jdcloud,re-ss-01 ] || exit 2
+          [ -b /dev/mmcblk0p18 ] || exit 2
+          actual=$(head -c "$1" /dev/mmcblk0p18 | sha256sum | cut -d' ' -f1)
+          printf 'Expected: %s\nActual:   %s\n' "$2" "$actual"
+          [ "$actual" = "$2" ] || { echo 'FAIL: rootfs differs; do not rely on overlay repairs alone.' >&2; exit 1; }
+          echo 'PASS: installed SquashFS matches the release.'
+          ROUTER_PROFILE_EOF
+          mkdir -p router-profile
+          cat > router-profile/prepare-build.sh <<'ROUTER_PROFILE_EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          mkdir -p files
+          cp -a router-profile/files/. files/
+          chmod 755 files/usr/sbin/router-* files/etc/uci-defaults/99-router-profile
+          for f in files/usr/sbin/router-* files/etc/uci-defaults/99-router-profile; do sh -n "$f"; done
+          # No credentials or per-device state may enter the public image overlay.
+          if find files -type f | grep -E '/(tailscaled\.state|shadow|smbpasswd|id_rsa|id_ed25519)$'; then
+           echo 'Private device state found in overlay' >&2; exit 1
+          fi
+          # Preserve native firmware defaults. Do not append unverified Go memory caps.
+          test -f feeds/packages/net/tailscale/Makefile
+          test -f feeds/passwall/luci-app-passwall/Makefile
+          ROUTER_PROFILE_EOF
+          mkdir -p router-profile
+          cat > router-profile/verify-image.py <<'ROUTER_PROFILE_EOF'
+          #!/usr/bin/env python3
+          """Fail closed on corrupt data blocks; directory listings alone are insufficient."""
+          import hashlib
+          import json
+          from pathlib import Path
+          import struct
+          import subprocess
+          import tarfile
+          import tempfile
+          
+          out = Path('bin/targets/qualcommax/ipq60xx')
+          images = list(out.glob('*jdcloud*squashfs-sysupgrade.bin'))
+          assert len(images) == 1, f'Expected one sysupgrade, got {images}'
+          image = images[0]
+          with tarfile.open(image) as archive:
+              root_name = 'sysupgrade-jdcloud_re-ss-01/root'
+              root = archive.extractfile(root_name).read()
+              kernel_size = archive.getmember('sysupgrade-jdcloud_re-ss-01/kernel').size
+          assert 0 < kernel_size <= 12 * 1024 * 1024, 'Kernel exceeds required HLOS12M'
+          assert root[:4] == b'hsqs', 'Wrong SquashFS header'
+          size = struct.unpack_from('<Q', root, 40)[0]
+          assert 96 < size <= len(root) < 2 * 1024**3, 'Invalid rootfs size'
+          root_hash = hashlib.sha256(root[:size]).hexdigest()
+          with tempfile.TemporaryDirectory(prefix='router-image-') as td:
+              td = Path(td)
+              sq = td / 'root.sqsh'
+              sq.write_bytes(root)
+              dest = td / 'root'
+              subprocess.run(['unsquashfs', '-no-progress', '-no-xattrs', '-d', str(dest), str(sq)], check=True)
+              required = [
+                  'usr/sbin/wpad', 'usr/sbin/hostapd', 'usr/sbin/tailscaled',
+                  'usr/sbin/tailscale', 'usr/bin/xray', 'usr/bin/hysteria',
+                  'etc/init.d/passwall', 'etc/init.d/tailscale',
+                  'usr/sbin/router-exit-setup', 'usr/sbin/router-rootfs-verify',
+                  'usr/sbin/router-network-check',
+              ]
+              for rel in required:
+                  p = dest / rel
+                  assert p.is_file(), f'Missing {rel}'
+                  assert p.stat().st_mode & 0o111, f'Not executable: {rel}'
+              for rel in ['usr/sbin/wpad', 'usr/sbin/tailscaled', 'usr/bin/xray', 'usr/bin/hysteria']:
+                  header = (dest / rel).read_bytes()[:64]
+                  assert header[:4] == b'\x7fELF' and header[4:6] == b'\x02\x01', f'Not ELF64 LE: {rel}'
+                  assert struct.unpack_from('<H', header, 18)[0] == 183, f'Not AArch64: {rel}'
+              for rel in ['etc/init.d/tailscale', 'etc/init.d/passwall', 'usr/sbin/router-exit-setup']:
+                  p = dest / rel
+                  assert b'\r' not in p.read_bytes(), f'CRLF in {rel}'
+                  subprocess.run(['sh', '-n', str(p)], check=True)
+          # Factory must carry exactly the same SquashFS as sysupgrade.
+          factory_images = list(out.glob('*jdcloud*squashfs-factory.bin'))
+          assert len(factory_images) == 1, 'Expected one factory image'
+          factory = factory_images[0].read_bytes()
+          offset = factory.find(root[:96])
+          assert offset >= 0 and factory[offset:offset + size] == root[:size], 'Factory/sysupgrade rootfs mismatch'
+          (out / 'rootfs-integrity.txt').write_text(
+              f'BYTES={size}\nSHA256={root_hash}\n'
+              f'CHECK_COMMAND=router-rootfs-verify {size} {root_hash}\n'
+              'NOTE=Compare immutable SquashFS bytes only, not overlay or padding.\n'
+          )
+          files = [image, *factory_images]
+          (out / 'SHA256SUMS').write_text(''.join(
+              f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in files
+          ))
+          (out / 'router-validation.json').write_text(json.dumps({
+              'board': 'jdcloud,re-ss-01', 'rootfs_bytes': size, 'rootfs_sha256': root_hash,
+              'full_unsquashfs': 'passed', 'elf_architecture': 'aarch64',
+              'factory_sysupgrade_match': True, 'hardware_test': 'pending',
+          }, indent=2) + '\n')
+          print(f'PASS static image checks. Hardware verification required. Rootfs: {size} {root_hash}')
+          ROUTER_PROFILE_EOF
+          chmod +x router-profile/prepare-build.sh
 
       - name: 规范化 vendored 包行尾 (Normalize vendored line endings)
         run: |
@@ -112,13 +350,20 @@ jobs:
             python3-setuptools python3-dev rsync unzip zlib1g-dev file wget \
             subversion patch vim-common quilt asciidoc autoconf automake \
             libtool-bin ccache libltdl-dev libglib2.0-dev libgmp-dev \
-            libmpfr-dev libmpc-dev libelf-dev zstd
+            libmpfr-dev libmpc-dev libelf-dev zstd squashfs-tools
           sudo apt-get clean
 
       - name: 更新/安装 Feeds
         run: |
+          # Fixed PassWall revisions: reproduce the nodes tested on this router.
+          printf '%s\n' \
+            'src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git^da712cf06cf4e6fd39e147fb36e6ec936003fcc9' \
+            'src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git^cde9833e1e4361953e6b48ce3f9ae158d37cf268' >> feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          ./scripts/feeds install -f -a -p passwall_packages
+          ./scripts/feeds install -f -a -p passwall
+          bash router-profile/prepare-build.sh
           echo "::group::store feed（iStore 应用商店本体）是否已注册"
           ./scripts/feeds list -n 2>/dev/null | grep -E '^(luci-app-store|taskd|luci-lib-taskd|luci-lib-xterm)$' || \
             echo "警告：store feed 中的包未列出"
@@ -324,6 +569,26 @@ jobs:
           CONFIG_PACKAGE_conntrack=y
           CONFIG_PACKAGE_ruby=y
           CONFIG_PACKAGE_ruby-yaml=y
+
+          # Integrated services; credentials and exit approval stay per device.
+          CONFIG_PACKAGE_tailscale=y
+          CONFIG_PACKAGE_wpad-basic-mbedtls=y
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
+          CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y
+          CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=n
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Geodata=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=n
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SmartDNS=n
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy=n
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client=n
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=n
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs=n
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin=n
+          CONFIG_PACKAGE_hysteria=y
+          CONFIG_PACKAGE_xray-core=y
           EOF
 
       - name: 展开默认配置并校验机型 (defconfig + verify)
@@ -394,6 +659,11 @@ jobs:
           minidlna
           "
           NIKKI="
+          tailscale
+          wpad-basic-mbedtls
+          luci-app-passwall
+          hysteria
+          xray-core
           kmod-nf-conntrack-netlink
           kmod-netlink-diag
           dnsmasq-full
@@ -516,7 +786,7 @@ jobs:
           echo "TUN 支持校验通过：kmod-tun 已入固件"
 
           # Nikki 依赖必须齐全：缺任一 kmod，用户的 .run 包都会因依赖不满足装不上
-          for pkg in kmod-inet-diag kmod-nft-socket kmod-nft-tproxy yq kmod-nf-conntrack-netlink kmod-netlink-diag dnsmasq-full ip-full conntrack ruby ruby-yaml; do
+          for pkg in tailscale wpad-basic-mbedtls luci-app-passwall hysteria xray-core kmod-inet-diag kmod-nft-socket kmod-nft-tproxy yq kmod-nf-conntrack-netlink kmod-netlink-diag dnsmasq-full ip-full conntrack ruby ruby-yaml; do
             if ! grep -q "^${pkg} " "$MANIFEST"; then
               echo "::error::manifest 中没有 ${pkg}，Nikki 的 .run 安装包将无法安装"
               exit 1
@@ -736,6 +1006,11 @@ jobs:
           fi
           echo "服务自启校验通过：二进制 / init 脚本 / 启用脚本 / 前端资源齐全，行尾为 LF，中文翻译文件在位，反代 tcp+unix 双通道正确，菜单无重复「主页」"
 
+      - name: 完整解包、无线程序及刷写校验清单 (Verify complete image)
+        run: |
+          python3 router-profile/verify-image.py
+          cp router-profile/README.md bin/targets/qualcommax/ipq60xx/router-profile-README.md
+
       - name: 上传固件 (Upload firmware)
         uses: actions/upload-artifact@v4
         if: always()
@@ -744,6 +1019,10 @@ jobs:
           path: |
             bin/targets/qualcommax/ipq60xx/*.bin
             bin/targets/qualcommax/ipq60xx/*.manifest
+            bin/targets/qualcommax/ipq60xx/rootfs-integrity.txt
+            bin/targets/qualcommax/ipq60xx/router-validation.json
+            bin/targets/qualcommax/ipq60xx/SHA256SUMS
+            bin/targets/qualcommax/ipq60xx/router-profile-README.md
           if-no-files-found: warn
           retention-days: 30
 
@@ -803,6 +1082,10 @@ jobs:
             echo
             echo "### 固件包含"
             echo
+            echo "- 内置 PassWall（Hysteria2 / Xray）和 Tailscale；不含账户、节点密码及共享密码"
+            echo "- 新增 router-exit-setup / router-network-check / router-rootfs-verify"
+            echo "- 完整解包验证、AArch64 ELF 检查、factory/sysupgrade 一致性与 rootfs 刷写后校验清单"
+            echo "- 本版本为待实机验证 prerelease；静态检查不等于无线/出口已完成实机测试"
             echo "- TUN/TAP 虚拟网卡（kmod-tun）：TUN 模式代理可直接使用"
             echo "- daed 底层内核支持（BTF / XDP / BPF），daed 本体刷机后自行安装"
             echo "- Nikki（Mihomo）透明代理依赖：kmod-inet-diag / kmod-nft-socket / kmod-nft-tproxy + yq"
@@ -819,6 +1102,8 @@ jobs:
         if: success()
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: true
+          make_latest: false
           tag_name: ${{ steps.ts.outputs.tag }}
           # 必须显式指定，否则 GitHub 会把 tag 打到「仓库默认分支的 HEAD」上。
           # 本工作流跑在 sync/istoreos-25.12-* 上；该分支目前就是默认分支，
@@ -830,6 +1115,10 @@ jobs:
           files: |
             bin/targets/qualcommax/ipq60xx/*.bin
             bin/targets/qualcommax/ipq60xx/*.manifest
+            bin/targets/qualcommax/ipq60xx/rootfs-integrity.txt
+            bin/targets/qualcommax/ipq60xx/router-validation.json
+            bin/targets/qualcommax/ipq60xx/SHA256SUMS
+            bin/targets/qualcommax/ipq60xx/router-profile-README.md
           # 正文由上一步「生成发布说明」产出（含 本次更新 / 官方 iStoreOS 更新内容）
           body_path: release-body.md
         env:
