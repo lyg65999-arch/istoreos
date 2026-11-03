@@ -1,0 +1,23 @@
+#!/bin/sh
+# iPhone Files may report a writable Samba share as read-only without
+# Apple SMB extensions. Use the native option, preserving VFS and ACLs.
+[ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = jdcloud,re-ss-01 ] || exit 0
+[ -f /etc/config/samba4 ] || exit 1
+
+for module in catia fruit streams_xattr; do
+    [ -r "/usr/lib/samba/vfs/$module.so" ] || {
+        logger -t samba-apple-compat "Missing VFS module: $module; leaving Samba unchanged"
+        exit 1
+    }
+done
+
+. /lib/functions.sh
+config_load samba4
+enable_apple_compat() {
+    uci set "samba4.$1.macos=1"
+}
+config_foreach enable_apple_compat samba
+uci commit samba4 || exit 1
+# Samba init adds catia/fruit/streams_xattr and retains io_uring.
+# Keep users, passwords, shares, filesystem permissions and networking.
+exit 0
