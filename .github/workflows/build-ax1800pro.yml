@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - 'sync/**'
+      - 'feature/**'
     paths:
       - 'feeds.conf.default'
       - 'target/linux/qualcommax/**'
@@ -50,13 +51,13 @@ jobs:
           2. 校验固件 SHA256。全新刷入用 factory；已运行本系统用 sysupgrade。所有分区操作前备份原分区表。
           3. 首次配置管理员密码和无线 WPA2/WPA3 密码。固件不嵌入公共 Wi-Fi 密码，也不会自动广播无密码网络。保留配置升级时不重写原密码。
           4. 用 release 中 `rootfs-integrity.txt` 的 BYTES、SHA256 运行 `router-rootfs-verify BYTES SHA256`。失败时不要用覆盖单文件的方法认定整机已修好。
-          5. 按实机分区建立/启用 swap 和 SMB。不得在启动脚本里自动格式化 p26/p27；分区号及 UUID 需逐台核实。不要复制另一台的 Tailscale state、主机密钥、MAC、磁盘 UUID。
+          5. 首次启动自动启用 256 MiB ZRAM（LZ4，优先级 100）；原有约 1 GiB 磁盘 Swap 保持不变。固件不会格式化、重分区或改写任何磁盘 Swap。Samba4 需在 LuCI 中设置共享目录与访问账户。不要复制另一台的 Tailscale state、主机密钥、MAC、磁盘 UUID。
           
           ## PassWall 与 Tailscale 出口
           
-          1. 在 PassWall 界面导入自己的节点，先测试 LAN 的国内 DNS、Google 和 X，再启用手机出口。HY2 用 Hysteria2；VLESS+WS+TLS 用 Xray。优先保留已经验证正常的主节点，备用节点不自动切换。
+          1. 在 PassWall 2 界面导入自己的节点，先测试 LAN 的国内 DNS、Google 和 X，再启用手机出口。HY2 用 Hysteria2；VLESS+WS+TLS 用 Xray。优先保留已经验证正常的主节点，备用节点不自动切换。
           2. `/etc/init.d/tailscale enable`，`/etc/init.d/tailscale start`；`tailscale up --accept-dns=false`，自行完成账户授权。不要接受其他出口节点的子网路由，除非确有需求。
-          3. 检查 PassWall 的实际透明代理端口与 DNS 端口。已调试版本为 1041 和 11400，升级后必须复核。
+          3. 检查 PassWall 2 的实际透明代理端口与 DNS 端口。已调试版本为 1041 和 11400，升级后必须复核。
           4. 执行 `router-exit-setup PHONE_TAILSCALE_IPV4 '1041 11400'`。脚本仅允许所指定手机的 IPv4 到 WAN 及所需路由器端口；不开放其他 tailnet 设备和 LAN 共享。它会从 tailscaled 实际监听信息获取 PeerAPI 端口，备份防火墙并执行 fw4 check。已有其他 tailscale0 防火墙分区时会拒绝创建重复区域，需保留/迁移原规则。
           5. Tailscale 后台批准本机出口，手机出口选这台新路由器。断开其他 VPN 后测试。运行 `router-network-check` 检查资源、DNS监听与无线状态。PeerAPI 端口改变后重跑出口脚本。此脚本目前只配置 IPv4 出口，不能视为 IPv6 完整出口方案。
           
