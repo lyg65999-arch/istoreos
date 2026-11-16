@@ -245,7 +245,7 @@ jobs:
               sq = td / 'root.sqsh'
               sq.write_bytes(root)
               dest = td / 'root'
-              subprocess.run(['unsquashfs', '-no-progress', '-no-xattrs', '-d', str(dest), str(sq)], check=True)
+              subprocess.run(['unsquashfs', '-no-progress', '-no-xattrs', '-no-exit-code', '-d', str(dest), str(sq)], check=True)
               required = [
                   'usr/sbin/wpad', 'usr/sbin/hostapd', 'usr/sbin/tailscaled',
                   'usr/sbin/tailscale', 'usr/bin/xray', 'usr/bin/hysteria',
