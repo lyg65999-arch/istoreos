@@ -43,7 +43,7 @@ jobs:
           
           ## 固件与首次部署
           
-          固件内置 PassWall 2（Xray / Sing-Box 核心）、Tailscale 及其 LuCI 管理界面、Samba4、dnsmasq-full 和匹配内核的 TUN/nftables 依赖。PassWall 2 与依赖包使用固定提交；Tailscale 与无线驱动来自固件原生 feeds。代理服务首次刷机后需由用户导入节点并启用。
+          固件内置 PassWall（Hysteria2 / Xray）、Tailscale 及其 LuCI 管理界面、Samba4、dnsmasq-full 和匹配内核的 TUN/nftables 依赖。PassWall 与依赖包使用固定提交；Tailscale 与无线驱动来自固件原生 feeds。代理服务首次刷机后需由用户导入节点并启用。
           
           新固件先作为 prerelease 发布。构建通过不等于实机验证通过：刷写后必须验证系统分区、两个无线频段、LAN 上网和手机出口，再用于下一台设备。
           
@@ -55,9 +55,9 @@ jobs:
           
           ## PassWall 与 Tailscale 出口
           
-          1. 在 PassWall 2 界面导入自己的节点，先测试 LAN 的国内 DNS、Google 和 X，再启用手机出口。HY2 用 Hysteria2；VLESS+WS+TLS 用 Xray。优先保留已经验证正常的主节点，备用节点不自动切换。
+          1. 在 PassWall 界面导入自己的节点，先测试 LAN 的国内 DNS、Google 和 X，再启用手机出口。HY2 用 Hysteria2；VLESS+WS+TLS 用 Xray。优先保留已经验证正常的主节点，备用节点不自动切换。
           2. `/etc/init.d/tailscale enable`，`/etc/init.d/tailscale start`；`tailscale up --accept-dns=false`，自行完成账户授权。不要接受其他出口节点的子网路由，除非确有需求。
-          3. 检查 PassWall 2 的实际透明代理端口与 DNS 端口。已调试版本为 1041 和 11400，升级后必须复核。
+          3. 检查 PassWall 的实际透明代理端口与 DNS 端口。已调试版本为 1041 和 11400，升级后必须复核。
           4. 执行 `router-exit-setup PHONE_TAILSCALE_IPV4 '1041 11400'`。脚本仅允许所指定手机的 IPv4 到 WAN 及所需路由器端口；不开放其他 tailnet 设备和 LAN 共享。它会从 tailscaled 实际监听信息获取 PeerAPI 端口，备份防火墙并执行 fw4 check。已有其他 tailscale0 防火墙分区时会拒绝创建重复区域，需保留/迁移原规则。
           5. Tailscale 后台批准本机出口，手机出口选这台新路由器。断开其他 VPN 后测试。运行 `router-network-check` 检查资源、DNS监听与无线状态。PeerAPI 端口改变后重跑出口脚本。此脚本目前只配置 IPv4 出口，不能视为 IPv6 完整出口方案。
           
@@ -178,7 +178,7 @@ jobs:
           printf '\n== Tailscale ==\n'; tailscale status
           printf '\n== Forwarding ==\n'; sysctl net.ipv4.ip_forward net.ipv6.conf.all.forwarding
           printf '\n== Policy routing ==\n'; ip -4 rule show
-          printf '\n== Listening proxy/VPN processes ==\n'; netstat -lntup 2>/dev/null | grep -E 'tailscaled|hysteria|xray|sing-box|dnsmasq'
+          printf '\n== Listening proxy/VPN processes ==\n'; netstat -lntup 2>/dev/null | grep -E 'tailscaled|hysteria|xray|xray-core|dnsmasq'
           printf '\n== Recent faults (may include old faults) ==\n'; logread | grep -Ei 'Out of memory|Killed process|SQUASHFS error|AP-ENABLED|failed to execute.*hostapd' | tail -12
           ROUTER_PROFILE_EOF
           mkdir -p router-profile/files/usr/sbin
@@ -213,7 +213,7 @@ jobs:
           # Preserve native firmware defaults. Do not append unverified Go memory caps.
           test -f feeds/packages/net/tailscale/Makefile
           test -f feeds/luci/applications/luci-app-tailscale-community/Makefile
-          test -f feeds/passwall2/luci-app-passwall2/Makefile
+          test -f feeds/passwall/luci-app-passwall/Makefile
           ROUTER_PROFILE_EOF
           mkdir -p router-profile
           cat > router-profile/verify-image.py <<'ROUTER_PROFILE_EOF'
@@ -249,7 +249,7 @@ jobs:
               required = [
                   'usr/sbin/wpad', 'usr/sbin/hostapd', 'usr/sbin/tailscaled',
                   'usr/sbin/tailscale', 'usr/bin/xray', 'usr/bin/hysteria',
-                  'etc/init.d/passwall2', 'etc/init.d/tailscale', 'etc/init.d/zram',
+                  'etc/init.d/passwall', 'etc/init.d/tailscale', 'etc/init.d/zram',
                   'usr/sbin/router-exit-setup', 'usr/sbin/router-rootfs-verify',
                   'usr/sbin/router-network-check',
               ]
@@ -261,7 +261,7 @@ jobs:
                   header = (dest / rel).read_bytes()[:64]
                   assert header[:4] == b'\x7fELF' and header[4:6] == b'\x02\x01', f'Not ELF64 LE: {rel}'
                   assert struct.unpack_from('<H', header, 18)[0] == 183, f'Not AArch64: {rel}'
-              for rel in ['etc/init.d/tailscale', 'etc/init.d/passwall2', 'etc/init.d/zram', 'usr/sbin/router-exit-setup']:
+              for rel in ['etc/init.d/tailscale', 'etc/init.d/passwall', 'etc/init.d/zram', 'usr/sbin/router-exit-setup']:
                   p = dest / rel
                   assert b'\r' not in p.read_bytes(), f'CRLF in {rel}'
                   subprocess.run(['sh', '-n', str(p)], check=True)
@@ -378,12 +378,12 @@ jobs:
         run: |
           # Fixed PassWall revisions: reproduce the nodes tested on this router.
           printf '%s\n' \
-            'src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git^8147e8bf8abc62b5357f76defa37f380e35f6e0a' \
-            'src-git passwall2 https://github.com/Openwrt-Passwall/openwrt-passwall2.git^9ea760ffdee3fd8735df6a5bee842b3dd654be86' >> feeds.conf.default
+            'src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git^da712cf06cf4e6fd39e147fb36e6ec936003fcc9' \
+            'src-git passwall https://github.com/Openwrt-Passwall/openwrt-passwall.git^cde9833e1e4361953e6b48ce3f9ae158d37cf268' >> feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           ./scripts/feeds install -f -a -p passwall_packages
-          ./scripts/feeds install -f -a -p passwall2
+          ./scripts/feeds install -f -a -p passwall
           bash router-profile/prepare-build.sh
           echo "::group::store feed（iStore 应用商店本体）是否已注册"
           ./scripts/feeds list -n 2>/dev/null | grep -E '^(luci-app-store|taskd|luci-lib-taskd|luci-lib-xterm)$' || \
@@ -554,7 +554,7 @@ jobs:
 
           # ===============================================================
           # J. TUN/TAP 虚拟网卡（TUN 模式代理的前置）
-          # Tailscale / sing-box(tun) / OpenClash / passwall 等都要先有 /dev/net/tun。
+          # Tailscale / OpenClash / passwall 等都要先有 /dev/net/tun。
           # 本包把 tun 编成模块 tun.ko 放进 rootfs（安装后约 80 KB，占 2 GB 分区
           # 约 0.004%），**不进 12 MiB 内核分区**，因此内核镜像体积不变。
           # 注意：外部预编译的 kmod 一律不可用（内核哈希必须与本固件一致），
@@ -597,14 +597,21 @@ jobs:
           CONFIG_PACKAGE_luci-app-tailscale-community=y
           CONFIG_PACKAGE_luci-i18n-tailscale-community-zh-cn=y
           CONFIG_PACKAGE_wpad-basic-mbedtls=y
-          # PassWall 2: include both supported cores for protocol flexibility; not forced to run simultaneously.
-          CONFIG_PACKAGE_luci-app-passwall2=y
-          CONFIG_PACKAGE_luci-i18n-passwall2-zh-cn=y
-          CONFIG_PACKAGE_luci-app-passwall2_Nftables_Transparent_Proxy=y
-          CONFIG_PACKAGE_luci-app-passwall2_Iptables_Transparent_Proxy=n
-          CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_Xray=n
-          CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_SingBox=n
-          CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_All=y
+          # Original PassWall package: retain the previously used Hysteria2 + Xray setup.
+          CONFIG_PACKAGE_luci-app-passwall=y
+          CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
+          CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y
+          CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=n
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Geodata=y
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=n
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SmartDNS=n
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy=n
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client=n
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=n
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs=n
+          CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin=n
           CONFIG_PACKAGE_hysteria=y
           CONFIG_PACKAGE_xray-core=y
           # ZRAM: 256 MiB, LZ4 compressor; preserve existing 1 GiB disk swap.
@@ -665,8 +672,8 @@ jobs:
           luci-i18n-samba4-zh-cn
           luci-app-tailscale-community
           luci-i18n-tailscale-community-zh-cn
-          luci-app-passwall2
-          luci-i18n-passwall2-zh-cn
+          luci-app-passwall
+          luci-i18n-passwall-zh-cn
           zram-swap
           kmod-zram
           "
@@ -689,7 +696,7 @@ jobs:
           NIKKI="
           tailscale
           wpad-basic-mbedtls
-          luci-app-passwall2
+          luci-app-passwall
           luci-app-tailscale-community
           zram-swap
           kmod-zram
@@ -811,13 +818,13 @@ jobs:
 
           # TUN 支持必须真的进固件：显式点名，缺了就失败，避免静默漏掉
           if ! grep -q '^kmod-tun ' "$MANIFEST"; then
-            echo "::error::manifest 中没有 kmod-tun，TUN 模式代理（Tailscale / sing-box tun / OpenClash / passwall）将无法使用"
+            echo "::error::manifest 中没有 kmod-tun，TUN 模式代理（Tailscale / xray-core tun / OpenClash / passwall）将无法使用"
             exit 1
           fi
           echo "TUN 支持校验通过：kmod-tun 已入固件"
 
           # Nikki 依赖必须齐全：缺任一 kmod，用户的 .run 包都会因依赖不满足装不上
-          for pkg in tailscale luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn luci-app-passwall2 luci-i18n-passwall2-zh-cn zram-swap kmod-zram wpad-basic-mbedtls hysteria xray-core kmod-inet-diag kmod-nft-socket kmod-nft-tproxy yq kmod-nf-conntrack-netlink kmod-netlink-diag dnsmasq-full ip-full conntrack ruby ruby-yaml; do
+          for pkg in tailscale luci-app-tailscale-community luci-i18n-tailscale-community-zh-cn luci-app-passwall luci-i18n-passwall-zh-cn zram-swap kmod-zram wpad-basic-mbedtls hysteria xray-core kmod-inet-diag kmod-nft-socket kmod-nft-tproxy yq kmod-nf-conntrack-netlink kmod-netlink-diag dnsmasq-full ip-full conntrack ruby ruby-yaml; do
             if ! grep -q "^${pkg} " "$MANIFEST"; then
               echo "::error::manifest 中没有 ${pkg}，Nikki 的 .run 安装包将无法安装"
               exit 1
@@ -1113,7 +1120,7 @@ jobs:
             echo
             echo "### 固件包含"
             echo
-            echo "- 内置 PassWall 2（Xray / Sing-Box）、Tailscale LuCI 管理界面、Samba4（Windows / macOS）及简体中文翻译"
+            echo "- 内置原版 PassWall（Hysteria2 / Xray）、Tailscale LuCI 管理界面、Samba4（Windows / macOS）及简体中文翻译"
             echo "- 内置 256 MiB ZRAM（LZ4，优先级 100）；保留设备已有 1 GiB 磁盘 Swap，不自动格式化或改写分区"
             echo "- 新增 router-exit-setup / router-network-check / router-rootfs-verify"
             echo "- 完整解包验证、AArch64 ELF 检查、factory/sysupgrade 一致性与 rootfs 刷写后校验清单"
